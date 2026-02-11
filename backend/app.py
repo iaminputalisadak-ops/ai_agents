@@ -23,6 +23,31 @@ from modules.text_to_speech import TextToSpeech
 from modules.task_executor import TaskExecutor
 
 
+def _read_key_from_disk() -> str:
+    """Read OPENAI_API_KEY from .env files - bulletproof parsing."""
+    from dotenv import load_dotenv
+    base = Path(__file__).resolve().parent  # backend/
+    root = base.parent  # voice-agent/
+    for p in [root / ".env", base / ".env"]:
+        if p.exists():
+            try:
+                load_dotenv(p, override=True)
+                k = (os.environ.get("OPENAI_API_KEY") or "").strip()
+                if k and k.startswith("sk-"):
+                    return k
+                # Fallback: parse manually
+                with open(p, "r", encoding="utf-8-sig") as f:
+                    for line in f:
+                        s = line.strip()
+                        if s.startswith("OPENAI_API_KEY=") and not s.startswith("#"):
+                            key = s.split("=", 1)[1].split("#")[0].strip().strip('"\'')
+                            if key and key.startswith("sk-"):
+                                return key
+            except Exception:
+                pass
+    return ""
+
+
 def _get_openai_key():
     """Get OpenAI key from Config, env, or .env file directly."""
     key = (Config.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -59,8 +84,12 @@ _frontend = Path(__file__).resolve().parent.parent / "frontend"
 app = Flask(__name__, static_folder=str(_frontend), static_url_path="")
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# Initialize modules - pass API key explicitly from direct read
-_openai_key = _get_openai_key()
+# Load and store API key - set once at startup, use everywhere
+_OPENAI_KEY = _get_openai_key() or _read_key_from_disk() or (os.environ.get("OPENAI_API_KEY") or "").strip()
+app.config["OPENAI_API_KEY"] = _OPENAI_KEY
+
+# Initialize modules
+_openai_key = _OPENAI_KEY
 speech_recognizer = SpeechRecognizer(energy_threshold=300, pause_threshold=0.8)
 ai_brain = AIBrain(api_key=_openai_key, memory_limit=Config.CONVERSATION_MEMORY_LIMIT)
 task_executor = TaskExecutor()
@@ -219,9 +248,10 @@ def api_chat():
             q = re.sub(r"^.*?\b(?:news|headlines)\s+(?:about\s+)?", "", text_lower).strip()
             response = task_executor.get_news(q or None)
 
-        # Fall back to AI if no task matched
+        # Fall back to AI if no task matched - always pass key from module-level _OPENAI_KEY
         if response is None:
-            response = ai_brain.process(text, use_wikipedia=True)
+            api_key = _OPENAI_KEY or app.config.get("OPENAI_API_KEY") or _read_key_from_disk()
+            response = ai_brain.process(text, use_wikipedia=True, api_key_override=api_key)
 
         # Optionally generate TTS
         audio_b64 = None
@@ -287,9 +317,11 @@ def api_voices():
 def api_health():
     """Health check and config validation."""
     missing = Config.validate()
+    key_loaded = bool(app.config.get("OPENAI_API_KEY") or _get_openai_key() or _read_key_from_disk())
     return jsonify({
-        "status": "ok" if not missing else "warning",
+        "status": "ok" if not missing and key_loaded else "warning",
         "missing_keys": missing,
+        "api_key_configured": key_loaded,
     })
 
 

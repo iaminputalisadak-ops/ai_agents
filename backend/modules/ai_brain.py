@@ -13,23 +13,53 @@ import wikipedia
 
 from config import Config
 
+# Cache the API key at module load - ensures it's available for all requests
+_CACHED_API_KEY: Optional[str] = None
+
 
 def _load_api_key_from_env_file() -> str:
-    """Read OPENAI_API_KEY directly from .env files."""
-    backend_dir = Path(__file__).resolve().parent.parent
-    root_dir = backend_dir.parent
-    for p in [root_dir / ".env", backend_dir / ".env"]:
-        if p.exists():
+    """Read OPENAI_API_KEY from .env files - tries multiple locations."""
+    # Paths: ai_brain.py is in backend/modules/, so backend=parent.parent, root=parent.parent.parent
+    this_file = Path(__file__).resolve()
+    backend_dir = this_file.parent.parent  # backend/
+    root_dir = backend_dir.parent          # voice-agent/
+    cwd = Path.cwd()
+
+    search_paths = [
+        root_dir / ".env",
+        backend_dir / ".env",
+        cwd / ".env",
+        cwd / "backend" / ".env",
+        cwd.parent / ".env" if cwd.name == "backend" else None,
+    ]
+
+    for p in search_paths:
+        if p and p.exists():
             try:
                 with open(p, "r", encoding="utf-8-sig", errors="ignore") as f:
                     for line in f:
                         s = line.strip()
-                        if s.startswith("OPENAI_API_KEY=") and not s.startswith("#"):
-                            key = s.split("=", 1)[1].split("#")[0].strip().strip('"\'')
-                            if key and key.startswith("sk-"):
-                                return key
+                        if "OPENAI_API_KEY" in s and "=" in s and not s.startswith("#"):
+                            # Handle OPENAI_API_KEY=value or OPENAI_API_KEY = value
+                            parts = s.split("=", 1)
+                            if parts[0].strip() == "OPENAI_API_KEY":
+                                key = parts[1].split("#")[0].strip().strip('"\'')
+                                if key and key.startswith("sk-"):
+                                    return key
             except Exception:
                 pass
+
+    # Fallback: load via dotenv
+    try:
+        from dotenv import load_dotenv
+        for p in [root_dir / ".env", backend_dir / ".env"]:
+            if p.exists():
+                load_dotenv(p, override=True)
+                key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+                if key and key.startswith("sk-"):
+                    return key
+    except ImportError:
+        pass
     return ""
 
 
@@ -56,7 +86,16 @@ Be natural and conversational. If you don't know something, say so honestly."""
             model: OpenAI model to use
             memory_limit: Number of message exchanges to keep in context
         """
-        self.api_key = api_key or Config.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY", "").strip()
+        global _CACHED_API_KEY
+        self.api_key = (
+            api_key
+            or _CACHED_API_KEY
+            or Config.OPENAI_API_KEY
+            or os.environ.get("OPENAI_API_KEY", "").strip()
+            or _load_api_key_from_env_file()
+        )
+        if self.api_key and not _CACHED_API_KEY:
+            _CACHED_API_KEY = self.api_key
         self.model = model or Config.OPENAI_MODEL
         self.memory_limit = memory_limit or Config.CONVERSATION_MEMORY_LIMIT
         self.conversation_history: deque = deque(maxlen=memory_limit * 2)
@@ -113,6 +152,7 @@ Be natural and conversational. If you don't know something, say so honestly."""
         user_input: str,
         use_wikipedia: bool = True,
         stream: bool = False,
+        api_key_override: Optional[str] = None,
     ) -> str:
         """
         Process user input and return AI response.
@@ -121,11 +161,18 @@ Be natural and conversational. If you don't know something, say so honestly."""
             user_input: User's message
             use_wikipedia: Whether to augment with Wikipedia search
             stream: Whether to stream response (not used in current implementation)
+            api_key_override: Optional API key passed at request time
 
         Returns:
             AI response text
         """
-        api_key = self.api_key or _load_api_key_from_env_file()
+        api_key = (
+            (api_key_override or "").strip()
+            or self.api_key
+            or _CACHED_API_KEY
+            or (os.environ.get("OPENAI_API_KEY") or "").strip()
+            or _load_api_key_from_env_file()
+        )
         if not api_key or not api_key.startswith("sk-"):
             return "Error: OpenAI API key not configured. Please set OPENAI_API_KEY in .env"
 
