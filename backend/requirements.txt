@@ -1,7 +1,7 @@
 # AI Voice Agent - Backend Dependencies (pinned versions)
 flask==2.3.0
 flask-cors==4.0.0
-openai==0.27.0
+openai>=1.0.0
 SpeechRecognition==3.10.0
 pyttsx3==2.90
 requests==2.31.0

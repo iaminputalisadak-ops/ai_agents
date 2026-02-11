@@ -137,7 +137,10 @@ async function processUserInput(text) {
     const data = await res.json();
 
     if (!data.success) {
-      throw new Error(data.error || 'Request failed');
+      addMessage('ai', data.error || 'Request failed');
+      setState('ready');
+      voiceStatus.textContent = 'Click to speak';
+      return;
     }
 
     addMessage('ai', data.response);
@@ -150,7 +153,7 @@ async function processUserInput(text) {
 
   } catch (err) {
     console.error(err);
-    addMessage('ai', `Error: ${err.message}`);
+    addMessage('ai', err.message?.startsWith('Error:') ? err.message : `Error: ${err.message}`);
   }
 
   setState('ready');
@@ -278,12 +281,25 @@ async function loadVoices() {
 // Init
 // =============================================================================
 
+async function checkHealth() {
+  try {
+    const res = await fetch(`${API_BASE}/health`);
+    const data = await res.json();
+    if (!data.api_key_configured) {
+      addMessage('ai', 'Setup required: Add OPENAI_API_KEY to voice-agent/.env and restart the server.');
+    }
+  } catch (_) {
+    addMessage('ai', 'Cannot reach server. Make sure it\'s running (py -3.12 run.py).');
+  }
+}
+
 function init() {
   voiceSpeed.value = state.settings.voiceSpeed;
   voiceVolume.value = state.settings.voiceVolume * 100;
   speedValue.textContent = state.settings.voiceSpeed;
   volumeValue.textContent = state.settings.voiceVolume * 100;
   initSpeechRecognition();
+  checkHealth();
 }
 
 init();

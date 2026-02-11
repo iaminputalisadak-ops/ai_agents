@@ -16,67 +16,12 @@ from flask_cors import CORS
 # Add backend directory to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from api_key import get_openai_key
 from config import Config
 from modules.speech_recognition import SpeechRecognizer
 from modules.ai_brain import AIBrain
 from modules.text_to_speech import TextToSpeech
 from modules.task_executor import TaskExecutor
-
-
-def _read_key_from_disk() -> str:
-    """Read OPENAI_API_KEY from .env files - bulletproof parsing."""
-    from dotenv import load_dotenv
-    base = Path(__file__).resolve().parent  # backend/
-    root = base.parent  # voice-agent/
-    for p in [root / ".env", base / ".env"]:
-        if p.exists():
-            try:
-                load_dotenv(p, override=True)
-                k = (os.environ.get("OPENAI_API_KEY") or "").strip()
-                if k and k.startswith("sk-"):
-                    return k
-                # Fallback: parse manually
-                with open(p, "r", encoding="utf-8-sig") as f:
-                    for line in f:
-                        s = line.strip()
-                        if s.startswith("OPENAI_API_KEY=") and not s.startswith("#"):
-                            key = s.split("=", 1)[1].split("#")[0].strip().strip('"\'')
-                            if key and key.startswith("sk-"):
-                                return key
-            except Exception:
-                pass
-    return ""
-
-
-def _get_openai_key():
-    """Get OpenAI key from Config, env, or .env file directly."""
-    key = (Config.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY") or "").strip()
-    if key and key.startswith("sk-"):
-        return key
-    # Fallback: read .env file directly (try multiple possible locations)
-    _backend = Path(__file__).resolve().parent
-    _root = _backend.parent
-    candidates = [
-        _root / ".env",
-        _backend / ".env",
-        Path.cwd() / ".env",
-        Path.cwd() / "backend" / ".env",
-    ]
-    for p in candidates:
-        if p.exists():
-            try:
-                with open(p, "r", encoding="utf-8-sig", errors="ignore") as f:
-                    for line in f:
-                        line = line.strip()
-                        if "OPENAI_API_KEY" in line and "=" in line and not line.startswith("#"):
-                            parts = line.split("=", 1)
-                            if len(parts) == 2 and parts[0].strip() == "OPENAI_API_KEY":
-                                key = parts[1].split("#")[0].strip().strip('"\'')
-                                if key and key.startswith("sk-"):
-                                    return key
-            except Exception:
-                pass
-    return ""
 
 
 # Initialize Flask app - use absolute path for static folder reliability
@@ -85,8 +30,10 @@ app = Flask(__name__, static_folder=str(_frontend), static_url_path="")
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # Load and store API key - set once at startup, use everywhere
-_OPENAI_KEY = _get_openai_key() or _read_key_from_disk() or (os.environ.get("OPENAI_API_KEY") or "").strip()
+_OPENAI_KEY = get_openai_key()
 app.config["OPENAI_API_KEY"] = _OPENAI_KEY
+if _OPENAI_KEY:
+    os.environ["OPENAI_API_KEY"] = _OPENAI_KEY  # ensure any os.getenv() sees it
 
 # Initialize modules
 _openai_key = _OPENAI_KEY
@@ -165,7 +112,10 @@ def api_process():
         if not text:
             return jsonify({"success": False, "error": "No text provided"}), 400
 
-        response = ai_brain.process(text, use_wikipedia=True)
+        api_key = _OPENAI_KEY or app.config.get("OPENAI_API_KEY") or get_openai_key()
+        response = ai_brain.process(text, use_wikipedia=True, api_key_override=api_key)
+        if response and response.strip().startswith("Error:"):
+            return jsonify({"success": False, "error": response.strip()}), 400
         return jsonify({"success": True, "response": response})
 
     except Exception as e:
@@ -250,8 +200,11 @@ def api_chat():
 
         # Fall back to AI if no task matched - always pass key from module-level _OPENAI_KEY
         if response is None:
-            api_key = _OPENAI_KEY or app.config.get("OPENAI_API_KEY") or _read_key_from_disk()
+            api_key = _OPENAI_KEY or app.config.get("OPENAI_API_KEY") or get_openai_key()
             response = ai_brain.process(text, use_wikipedia=True, api_key_override=api_key)
+
+        if response and response.strip().startswith("Error:"):
+            return jsonify({"success": False, "error": response.strip()}), 400
 
         # Optionally generate TTS
         audio_b64 = None
@@ -315,11 +268,12 @@ def api_voices():
 
 @app.route("/api/health", methods=["GET"])
 def api_health():
-    """Health check and config validation."""
-    missing = Config.validate()
-    key_loaded = bool(app.config.get("OPENAI_API_KEY") or _get_openai_key() or _read_key_from_disk())
+    """Health check - use centralized runtime key loader."""
+    key_loaded = bool((app.config.get("OPENAI_API_KEY") or "").strip().startswith("sk-") or
+                     (get_openai_key() or "").strip().startswith("sk-"))
+    missing = [] if key_loaded else ["OPENAI_API_KEY"]
     return jsonify({
-        "status": "ok" if not missing and key_loaded else "warning",
+        "status": "ok" if key_loaded else "warning",
         "missing_keys": missing,
         "api_key_configured": key_loaded,
     })

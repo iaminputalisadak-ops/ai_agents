@@ -5,62 +5,14 @@ Handles conversation context, reasoning, and Wikipedia search.
 
 import os
 from collections import deque
-from pathlib import Path
 from typing import Optional
 
-import openai
 import wikipedia
 
 from config import Config
 
-# Cache the API key at module load - ensures it's available for all requests
-_CACHED_API_KEY: Optional[str] = None
-
-
-def _load_api_key_from_env_file() -> str:
-    """Read OPENAI_API_KEY from .env files - tries multiple locations."""
-    # Paths: ai_brain.py is in backend/modules/, so backend=parent.parent, root=parent.parent.parent
-    this_file = Path(__file__).resolve()
-    backend_dir = this_file.parent.parent  # backend/
-    root_dir = backend_dir.parent          # voice-agent/
-    cwd = Path.cwd()
-
-    search_paths = [
-        root_dir / ".env",
-        backend_dir / ".env",
-        cwd / ".env",
-        cwd / "backend" / ".env",
-        cwd.parent / ".env" if cwd.name == "backend" else None,
-    ]
-
-    for p in search_paths:
-        if p and p.exists():
-            try:
-                with open(p, "r", encoding="utf-8-sig", errors="ignore") as f:
-                    for line in f:
-                        s = line.strip()
-                        if "OPENAI_API_KEY" in s and "=" in s and not s.startswith("#"):
-                            # Handle OPENAI_API_KEY=value or OPENAI_API_KEY = value
-                            parts = s.split("=", 1)
-                            if parts[0].strip() == "OPENAI_API_KEY":
-                                key = parts[1].split("#")[0].strip().strip('"\'')
-                                if key and key.startswith("sk-"):
-                                    return key
-            except Exception:
-                pass
-
-    # Fallback: load via dotenv
-    try:
-        from dotenv import load_dotenv
-        for p in [root_dir / ".env", backend_dir / ".env"]:
-            if p.exists():
-                load_dotenv(p, override=True)
-                key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-                if key and key.startswith("sk-"):
-                    return key
-    except ImportError:
-        pass
-    return ""
+# Use centralized key loader (backend/ is in sys.path from app)
+from api_key import get_openai_key
 
 
 class AIBrain:
@@ -86,16 +38,12 @@ Be natural and conversational. If you don't know something, say so honestly."""
             model: OpenAI model to use
             memory_limit: Number of message exchanges to keep in context
         """
-        global _CACHED_API_KEY
         self.api_key = (
-            api_key
-            or _CACHED_API_KEY
-            or Config.OPENAI_API_KEY
-            or os.environ.get("OPENAI_API_KEY", "").strip()
-            or _load_api_key_from_env_file()
+            (api_key or "").strip()
+            or (Config.OPENAI_API_KEY or "").strip()
+            or (os.environ.get("OPENAI_API_KEY") or "").strip()
+            or get_openai_key()
         )
-        if self.api_key and not _CACHED_API_KEY:
-            _CACHED_API_KEY = self.api_key
         self.model = model or Config.OPENAI_MODEL
         self.memory_limit = memory_limit or Config.CONVERSATION_MEMORY_LIMIT
         self.conversation_history: deque = deque(maxlen=memory_limit * 2)
@@ -147,6 +95,18 @@ Be natural and conversational. If you don't know something, say so honestly."""
 
         return messages
 
+    def _call_openai(self, api_key: str, messages: list[dict]) -> str:
+        """Call OpenAI API using openai>=1.0 client."""
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=300,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+
     def process(
         self,
         user_input: str,
@@ -168,10 +128,9 @@ Be natural and conversational. If you don't know something, say so honestly."""
         """
         api_key = (
             (api_key_override or "").strip()
-            or self.api_key
-            or _CACHED_API_KEY
+            or (self.api_key or "").strip()
             or (os.environ.get("OPENAI_API_KEY") or "").strip()
-            or _load_api_key_from_env_file()
+            or get_openai_key()
         )
         if not api_key or not api_key.startswith("sk-"):
             return "Error: OpenAI API key not configured. Please set OPENAI_API_KEY in .env"
@@ -182,15 +141,7 @@ Be natural and conversational. If you don't know something, say so honestly."""
         try:
             messages = self._build_messages(user_input.strip(), use_wikipedia=use_wikipedia)
 
-            openai.api_key = api_key
-            response = openai.ChatCompletion.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=300,
-                temperature=0.7,
-            )
-
-            assistant_message = response.choices[0].message.content.strip()
+            assistant_message = self._call_openai(api_key, messages)
 
             # Update conversation history
             self.conversation_history.append({"role": "user", "content": user_input})
